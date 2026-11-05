@@ -1,0 +1,77 @@
+name: Build PonWrt for XG-040G-MF
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PonWrt source
+        uses: actions/checkout@v4
+        with:
+          repository: pbs05/ponwrt
+          ref: master
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils \
+            bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj \
+            fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged \
+            help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo timedatectl set-timezone Asia/Shanghai
+
+      - name: Cache downloads and toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            staging_dir
+          key: ponwrt-an7583-${{ hashFiles('configs/an7583.config') }}
+          restore-keys: |
+            ponwrt-an7583-
+
+      - name: Configure (an7583 + extra packages)
+        run: |
+          cp configs/an7583.config .config
+          cat .github-extra.config >> .config
+          make defconfig
+
+      - name: Show selected packages (sanity check)
+        run: |
+          echo "=== Package selection check ==="
+          for p in luci luci-i18n-base-zh-hans luci-i18n-base-zh-cn luci-app-passwall \
+                   luci-app-openclash luci-app-tailscale-community luci-app-tailscale \
+                   kmod-usb-net-cdc-ncm kmod-usb-net-rndis https-dns-proxy \
+                   openssh-sftp-server xray-core mihomo; do
+            if grep -q "CONFIG_PACKAGE_${p}=y" .config; then
+              echo "OK   $p"
+            else
+              echo "MISS $p  (可能feed中不存在该名字)"
+            fi
+          done
+
+      - name: Download sources
+        run: make -j$(nproc) download
+
+      - name: Build firmware
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      - name: List artifacts
+        run: |
+          ls -lh bin/targets/airoha/an7583/ || true
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-an7583-${{ github.run_number }}
+          path: |
+            bin/targets/airoha/an7583/*
+          retention-days: 30
