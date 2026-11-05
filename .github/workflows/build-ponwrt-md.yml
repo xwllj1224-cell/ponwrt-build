@@ -1,0 +1,104 @@
+name: Build PonWrt for XG-040G-MD
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PonWrt source
+        uses: actions/checkout@v4
+        with:
+          repository: pbs05/ponwrt
+          ref: master
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils \
+            bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj \
+            fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged \
+            help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev \
+            libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
+            python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools \
+            subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo timedatectl set-timezone Asia/Shanghai
+
+      - name: Cache downloads and toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            staging_dir
+          key: ponwrt-an7581-v2-${{ hashFiles('configs/an7581.config') }}
+          restore-keys: |
+            ponwrt-an7581-v2-
+            ponwrt-an7581-
+            ponwrt-an7583-v2-
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure (an7581 + extra packages)
+        run: |
+          cp configs/an7581.config .config
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-hans=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-theme-argon=y
+          CONFIG_PACKAGE_luci-app-argon-config=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+          CONFIG_PACKAGE_kmod-usb-net-rndis=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+          CONFIG_PACKAGE_https-dns-proxy=y
+          CONFIG_PACKAGE_openssh-sftp-server=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-app-tailscale-community=y
+          CONFIG_PACKAGE_luci-app-tailscale=y
+          EOF
+          make defconfig
+
+      - name: Show selected packages (sanity check)
+        run: |
+          echo "=== Package selection check ==="
+          for p in luci luci-i18n-base-zh-hans luci-theme-argon luci-app-argon-config \
+                   luci-app-passwall luci-app-openclash luci-app-tailscale-community \
+                   kmod-usb-net-cdc-ncm kmod-usb-net-rndis https-dns-proxy \
+                   openssh-sftp-server xray-core mihomo; do
+            if grep -q "CONFIG_PACKAGE_${p}=y" .config; then
+              echo "OK   $p"
+            else
+              echo "MISS $p"
+            fi
+          done
+          echo "=== Device profiles ==="
+          grep -E "CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md" .config || true
+
+      - name: Download sources
+        run: make -j$(nproc) download
+
+      - name: Build firmware
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      - name: List artifacts
+        run: |
+          ls -lh bin/targets/airoha/an7581/ || true
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponwrt-an7581-${{ github.run_number }}
+          path: |
+            bin/targets/airoha/an7581/*
+          retention-days: 30
