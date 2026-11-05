@@ -33,14 +33,36 @@ jobs:
           path: |
             dl
             staging_dir
-          key: ponwrt-an7583-${{ hashFiles('configs/an7583.config') }}
+          key: ponwrt-an7583-v2-${{ hashFiles('configs/an7583.config') }}
           restore-keys: |
+            ponwrt-an7583-v2-
             ponwrt-an7583-
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
       - name: Configure (an7583 + extra packages)
         run: |
           cp configs/an7583.config .config
-          cat .github-extra.config >> .config
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-hans=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
+          CONFIG_PACKAGE_kmod-usb-net-rndis=y
+          CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+          CONFIG_PACKAGE_https-dns-proxy=y
+          CONFIG_PACKAGE_openssh-sftp-server=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-app-tailscale-community=y
+          CONFIG_PACKAGE_luci-app-tailscale=y
+          EOF
           make defconfig
 
       - name: Show selected packages (sanity check)
@@ -53,9 +75,11 @@ jobs:
             if grep -q "CONFIG_PACKAGE_${p}=y" .config; then
               echo "OK   $p"
             else
-              echo "MISS $p  (可能feed中不存在该名字)"
+              echo "MISS $p"
             fi
           done
+          echo "=== Device profiles ==="
+          grep -E "CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_nokia_xg-040g-mf" .config || true
 
       - name: Download sources
         run: make -j$(nproc) download
