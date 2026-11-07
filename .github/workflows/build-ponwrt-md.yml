@@ -311,11 +311,15 @@ jobs:
             || { echo "::error::tcboot 变体未被选中（设备定义可能没生效）"; exit 1; }
 
           echo "=== 光口驱动（缺一个都白刷）==="
+          # DEVICE_PACKAGES 不进 .config，只在镜像打包时解析，所以直接查设备定义
           for p in kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond; do
-            grep -q "CONFIG_PACKAGE_${p}=y" .config \
-              || { echo "::error::缺少光口包 $p"; exit 1; }
+            grep -q "$p" target/linux/airoha/image/an7581.mk \
+              || { echo "::error::设备定义里缺少光口包 $p"; exit 1; }
             echo "OK   $p"
           done
+          grep -q "DEVICE_PACKAGES := ubi-utils" target/linux/airoha/image/an7581.mk \
+            && { echo "::error::DEVICE_PACKAGES 用了 := ，会覆盖掉继承的光口包"; exit 1; }
+          echo "OK   tcboot 变体用 += 继承光口包"
 
           echo "=== 镜像规则确认 ==="
           grep -n -A16 "define Device/nokia_xg-040g-md-tcboot" target/linux/airoha/image/an7581.mk
