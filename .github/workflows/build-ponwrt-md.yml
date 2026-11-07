@@ -121,7 +121,7 @@ jobs:
           print("ri MAC:", ":".join(f"{x:02x}" for x in r[0x3e:0x44]))
           CHK
 
-      - name: Add tcboot-compatible MD variant (stock U-Boot, non-UBI-kernel)
+      - name: Add tcboot-compatible MD variant (stock bootloader, kernel in UBI)
         run: |
           cat > target/linux/airoha/dts/an758x-nokia_xg-040g-tcboot-parts.dtsi <<'PARTSEOF'
           // SPDX-License-Identifier: GPL-2.0-only OR MIT
@@ -131,7 +131,7 @@ jobs:
 
           / {
           	chosen {
-          		bootargs = "ubi.mtd=ubi root=ubi0:rootfs rootfstype=squashfs ro rootwait console=ttyS0,115200 earlycon";
+          		bootargs = "ubi.mtd=ubi root=/dev/ubiblock0_1 rootwait ubi.block=0,rootfs rootfstype=squashfs ro init=/etc/preinit";
           	};
           };
 
@@ -223,12 +223,13 @@ jobs:
             DEVICE_VARIANT := (tcboot)
             DEVICE_DTS := an7581-nokia_xg-040g-md-tcboot
             SUPPORTED_DEVICES += nokia,xg-040g-md
-            KERNEL_SIZE := 8192k
+            KERNEL_SIZE := 5120k
             IMAGE_SIZE := 261120k
             KERNEL_LOADADDR := 0x80088000
-            UBINIZE_PARTS := bosa=$(TOPDIR)/tcboot-parts/bosa.bin=1 ri=$(TOPDIR)/tcboot-parts/ri.bin=1
+            KERNEL_IN_UBI := 1
+            UBINIZE_PARTS_AFTER := bosa=$(TOPDIR)/tcboot-parts/bosa.bin=1 ri=$(TOPDIR)/tcboot-parts/ri.bin=1
             IMAGES := factory.bin sysupgrade.bin
-            IMAGE/factory.bin := append-kernel | pad-to $$$$(KERNEL_SIZE) | append-ubi
+            IMAGE/factory.bin := append-kernel | pad-to 5120k | append-ubi
             IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
             DEVICE_PACKAGES += ubi-utils
           endef
@@ -320,6 +321,21 @@ jobs:
           grep -q "DEVICE_PACKAGES := ubi-utils" target/linux/airoha/image/an7581.mk \
             && { echo "::error::DEVICE_PACKAGES 用了 := ，会覆盖掉继承的光口包"; exit 1; }
           echo "OK   tcboot 变体用 += 继承光口包"
+
+          echo "=== 引导布局关键项（照着设备现场抄的）==="
+          # 设备现场：mtd0 bootloader 512K / mtd1 env 512K / mtd2 ubi 255M @0x100000
+          # 现场 ubi 卷顺序：kernel(0) rootfs(1) rootfs_data(2)，引导器从 kernel 卷取内核
+          grep -q "KERNEL_IN_UBI := 1" target/linux/airoha/image/an7581.mk \
+            || { echo "::error::tcboot 变体缺少 KERNEL_IN_UBI，引导器找不到 kernel 卷会起不来"; exit 1; }
+          echo "OK   KERNEL_IN_UBI（内核进 ubi 的 kernel 卷）"
+          grep -q "UBINIZE_PARTS_AFTER" target/linux/airoha/image/an7581.mk \
+            || { echo "::error::bosa/ri 必须用 UBINIZE_PARTS_AFTER，否则会顶掉 kernel/rootfs 的卷号"; exit 1; }
+          grep -q "UBINIZE_PARTS :=" target/linux/airoha/image/an7581.mk \
+            && { echo "::error::UBINIZE_PARTS 前置会改变 kernel(0)/rootfs(1) 卷号，现场 root=/dev/ubiblock0_1 会失效"; exit 1; }
+          echo "OK   bosa/ri 卷排在 rootfs 之后，卷号不变"
+          grep -q 'root=/dev/ubiblock0_1' target/linux/airoha/dts/an758x-nokia_xg-040g-tcboot-parts.dtsi \
+            || { echo "::error::bootargs 里 root= 必须是 /dev/ubiblock0_1（squashfs 在 ubiblock 上）"; exit 1; }
+          echo "OK   bootargs root=/dev/ubiblock0_1"
 
           echo "=== 镜像规则确认 ==="
           grep -n -A16 "define Device/nokia_xg-040g-md-tcboot" target/linux/airoha/image/an7581.mk
