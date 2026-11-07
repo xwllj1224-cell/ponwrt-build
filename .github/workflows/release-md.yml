@@ -6,7 +6,11 @@ on:
       run_id:
         description: "要取产物的 build run id"
         required: true
-        default: "42367359637"
+        default: "42381926119"
+      release_tag:
+        description: "Release tag（留空则 md-tcboot-<日期>）"
+        required: false
+        default: ""
 
 permissions:
   actions: read
@@ -21,7 +25,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ inputs.run_id }}
         run: |
-          gh run download "$RUN_ID" -R "${{ github.repository }}" -n ponwrt-md-8 -D art
+          NAME=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[0].name')
+          echo "artifact = $NAME"
+          gh run download "$RUN_ID" -R "${{ github.repository }}" -n "$NAME" -D art
           ls -lh art
 
       - name: Verify sha256
@@ -31,40 +37,55 @@ jobs:
           echo "=== tcboot 镜像哈希 ==="
           sha256sum *tcboot* | tee /tmp/tcboot.sha256
 
-      - name: Inspect image structure
+      - name: Inspect image structure (against real device layout)
         working-directory: art
         run: |
           python3 - <<'PY'
-          import struct, glob, hashlib, sys
+          import struct, glob, sys
 
           fn = glob.glob("*tcboot-squashfs-factory.bin")[0]
           d = open(fn, "rb").read()
           print(f"文件: {fn}  大小: {len(d)/1048576:.2f} MB")
-
           ok = True
 
-          # 1) FIT 头
-          magic = b"\xd0\x0d\xfe\xed"
-          if d[:4] != magic:
+          # ---- 1) FIT 头（上传页要求文件以 FIT 开头）----
+          if d[:4] != b"\xd0\x0d\xfe\xed":
               print(f"!! 头部不是 FIT: {d[:4].hex()}"); ok = False
           total = struct.unpack(">I", d[4:8])[0]
-          print(f"FIT totalsize = {total/1048576:.2f} MB")
+          print(f"FIT totalsize = {total/1048576:.2f} MB (pad 到 5MB)")
+          if total > 0x500000:
+              print("!! 内核超过 5MB padding，上传页会切不开"); ok = False
 
-          # 2) UBI 起点（pad-to 8192k 之后）
-          off = 0x800000
-          print(f"@0x800000 = {d[off:off+4]!r}")
+          # ---- 2) UBI 起点必须是 0x500000（与能启动的 bell factory 同形）----
+          off = 0x500000
           if d[off:off+4] != b"UBI#":
-              print("!! 0x800000 不是 UBI 起始"); ok = False
+              print(f"!! 0x500000 处不是 UBI#，实际={d[off:off+4]!r}"); ok = False
+          else:
+              print("OK  UBI 起点 0x500000")
 
-          # 3) 卷表里必须有 bosa / ri / rootfs / rootfs_data
           ubi = d[off:]
-          for name in (b"bosa", b"ri", b"rootfs", b"rootfs_data"):
+
+          # ---- 3) UBI 几何参数必须与设备一致 ----
+          # 设备现场：PEB 128KiB, min_io 2048, VID header offset 2048, data offset 4096
+          peb0 = ubi[0:64]
+          print(f"EC 头 magic={peb0[0:4]!r} version={peb0[4]}")
+          vid_found = None
+          for o in range(0, 4096, 512):
+              if ubi[o:o+4] == b"UBI!":
+                  vid_found = o
+                  break
+          print(f"VID header offset = {vid_found}")
+          if vid_found != 2048:
+              print("!! VID header offset 不是 2048，设备 attach 会失败"); ok = False
+
+          # ---- 4) 卷表：必须含 kernel（引导器从它取内核）+ rootfs/rootfs_data + bosa/ri ----
+          for name in (b"kernel", b"rootfs", b"rootfs_data", b"bosa", b"ri"):
               pos = ubi.find(name + b"\x00")
               print(f"卷名 {name.decode():12s} -> {hex(pos) if pos >= 0 else '缺失'}")
               if pos < 0:
-                  ok = False
+                  print(f"!! 缺少卷 {name.decode()}"); ok = False
 
-          # 4) 校准数据（bosa 卷内容：AA55 头 + ECONET 标识）
+          # ---- 5) 校准数据（bosa 卷：AA55 头 + ECONET 标识）----
           e = ubi.find(b"ECONET")
           if e > 0:
               head = ubi[e-0x16:e-0x16+2]
@@ -74,9 +95,8 @@ jobs:
           else:
               print("!! 没找到 ECONET 校准标识"); ok = False
 
-          # 5) 设备身份（ri 卷内容：NBEL 序列号 + MAC）
+          # ---- 6) 设备身份（ri 卷：NBEL 序列号 + MAC）----
           s = ubi.find(b"NBEL")
-          print(f"序列号 @ {hex(s) if s>=0 else '缺失'}")
           if s > 0:
               serial = ubi[s:s+0x10].split(b"\x20")[0].decode("latin1")
               macpos = ubi.find(bytes.fromhex("b0d1d62ec2db"))
@@ -87,6 +107,19 @@ jobs:
           else:
               print("!! 没找到 ri 卷里的序列号"); ok = False
 
+          # ---- 7) 内核 DTB 里的 bootargs（决定能不能挂上根）----
+          i = d.find(b"ubi.mtd=ubi")
+          if i > 0:
+              end = d.find(b"\x00", i)
+              bootargs = d[i:end].decode("latin1")
+              print("bootargs:", bootargs)
+              if "root=/dev/ubiblock0_1" not in bootargs:
+                  print("!! bootargs 里没有 root=/dev/ubiblock0_1"); ok = False
+              if "ubi.block=0,rootfs" not in bootargs:
+                  print("!! bootargs 里没有 ubi.block=0,rootfs"); ok = False
+          else:
+              print("!! 镜像里没找到 bootargs"); ok = False
+
           print("RESULT:", "PASS" if ok else "FAIL")
           sys.exit(0 if ok else 1)
           PY
@@ -94,14 +127,14 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_IN: ${{ inputs.release_tag }}
         run: |
-          TAG="md-tcboot-$(date +%Y%m%d)"
+          TAG="${TAG_IN:-md-tcboot-$(date +%Y%m%d-%H%M)}"
           gh release delete "$TAG" -R "${{ github.repository }}" --yes 2>/dev/null || true
           gh release create "$TAG" \
             art/*-md-tcboot-squashfs-factory.bin \
             art/*-md-tcboot-squashfs-sysupgrade.bin \
-            art/*-md-tcboot-initramfs-uImage.itb \
             art/sha256sums \
             -R "${{ github.repository }}" \
-            --title "XG-040G-MD tcboot 光口固件" \
-            --notes "原厂 tcboot 引导可直接刷的 PonWrt 光口固件。刷机入口 http://192.168.1.1/ ，选 *-tcboot-squashfs-factory.bin。已内置 bosa 光模块校准与 ri 设备身份（MAC/序列号），刷完即可注册 PON。"
+            --title "XG-040G-MD tcboot 光口固件 $TAG" \
+            --notes "原厂 tcboot 引导可直接刷的 PonWrt 光口固件（内核在 UBI kernel 卷，root=/dev/ubiblock0_1）。刷机入口 http://192.168.1.1/ ，选 *-tcboot-squashfs-factory.bin。已内置 bosa 光模块校准与 ri 设备身份（MAC/序列号）。"
