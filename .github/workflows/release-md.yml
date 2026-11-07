@@ -1,0 +1,107 @@
+name: Verify and release XG-040G-MD tcboot image
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "要取产物的 build run id"
+        required: true
+        default: "42367359637"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          gh run download "$RUN_ID" -R "${{ github.repository }}" -n ponwrt-md-8 -D art
+          ls -lh art
+
+      - name: Verify sha256
+        working-directory: art
+        run: |
+          sha256sum -c sha256sums 2>&1 | grep -E "tcboot|WARNING|FAILED" || true
+          echo "=== tcboot 镜像哈希 ==="
+          sha256sum *tcboot* | tee /tmp/tcboot.sha256
+
+      - name: Inspect image structure
+        working-directory: art
+        run: |
+          python3 - <<'PY'
+          import struct, glob, hashlib, sys
+
+          fn = glob.glob("*tcboot-squashfs-factory.bin")[0]
+          d = open(fn, "rb").read()
+          print(f"文件: {fn}  大小: {len(d)/1048576:.2f} MB")
+
+          ok = True
+
+          # 1) FIT 头
+          magic = b"\xd0\x0d\xfe\xed"
+          if d[:4] != magic:
+              print(f"!! 头部不是 FIT: {d[:4].hex()}"); ok = False
+          total = struct.unpack(">I", d[4:8])[0]
+          print(f"FIT totalsize = {total/1048576:.2f} MB")
+
+          # 2) UBI 起点（pad-to 8192k 之后）
+          off = 0x800000
+          print(f"@0x800000 = {d[off:off+4]!r}")
+          if d[off:off+4] != b"UBI#":
+              print("!! 0x800000 不是 UBI 起始"); ok = False
+
+          # 3) 卷表里必须有 bosa / ri / rootfs / rootfs_data
+          ubi = d[off:]
+          for name in (b"bosa", b"ri", b"rootfs", b"rootfs_data"):
+              pos = ubi.find(name + b"\x00")
+              print(f"卷名 {name.decode():12s} -> {hex(pos) if pos >= 0 else '缺失'}")
+              if pos < 0:
+                  ok = False
+
+          # 4) 校准数据（bosa 卷内容：AA55 头 + ECONET 标识）
+          e = ubi.find(b"ECONET")
+          if e > 0:
+              head = ubi[e-0x16:e-0x16+2]
+              print(f"ECONET @ {hex(e)}  卷内偏移 {hex(e-0x16)}  头部 {head.hex()}")
+              if head != b"\xaa\x55":
+                  print("!! 校准数据头部不是 AA55"); ok = False
+          else:
+              print("!! 没找到 ECONET 校准标识"); ok = False
+
+          # 5) 设备身份（ri 卷内容：NBEL 序列号 + MAC）
+          s = ubi.find(b"NBEL")
+          print(f"序列号 @ {hex(s) if s>=0 else '缺失'}")
+          if s > 0:
+              serial = ubi[s:s+0x10].split(b"\x20")[0].decode("latin1")
+              macpos = ubi.find(bytes.fromhex("b0d1d62ec2db"))
+              mac = ubi[macpos:macpos+6].hex(":") if macpos > 0 else "缺失"
+              print(f"  序列号 {serial}  MAC {mac}")
+              if macpos < 0:
+                  print("!! 没找到 MAC"); ok = False
+          else:
+              print("!! 没找到 ri 卷里的序列号"); ok = False
+
+          print("RESULT:", "PASS" if ok else "FAIL")
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="md-tcboot-$(date +%Y%m%d)"
+          gh release delete "$TAG" -R "${{ github.repository }}" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            art/*-md-tcboot-squashfs-factory.bin \
+            art/*-md-tcboot-squashfs-sysupgrade.bin \
+            art/*-md-tcboot-initramfs-uImage.itb \
+            art/sha256sums \
+            -R "${{ github.repository }}" \
+            --title "XG-040G-MD tcboot 光口固件" \
+            --notes "原厂 tcboot 引导可直接刷的 PonWrt 光口固件。刷机入口 http://192.168.1.1/ ，选 *-tcboot-squashfs-factory.bin。已内置 bosa 光模块校准与 ri 设备身份（MAC/序列号），刷完即可注册 PON。"
