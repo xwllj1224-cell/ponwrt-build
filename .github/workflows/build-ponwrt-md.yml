@@ -98,6 +98,29 @@ jobs:
           done
           ./scripts/feeds install -a
 
+      - name: Stage bosa/ri volume data (from repo secrets)
+        env:
+          BOSA_B64: ${{ secrets.XG040G_BOSA_B64 }}
+          RI_B64: ${{ secrets.XG040G_RI_B64 }}
+        run: |
+          mkdir -p tcboot-parts
+          if [ -z "$BOSA_B64" ] || [ -z "$RI_B64" ]; then
+            echo "::error::缺少 XG040G_BOSA_B64 / XG040G_RI_B64 密钥，无法把光模块校准与设备身份写进 UBI 卷"
+            exit 1
+          fi
+          printf '%s' "$BOSA_B64" | base64 -d > tcboot-parts/bosa.bin
+          printf '%s' "$RI_B64" | base64 -d > tcboot-parts/ri.bin
+          ls -l tcboot-parts
+          python3 - <<'CHK'
+          b = open("tcboot-parts/bosa.bin", "rb").read()
+          r = open("tcboot-parts/ri.bin", "rb").read()
+          assert len(b) >= 0x202, f"bosa 太短: {len(b)}"
+          assert len(r) >= 0x44, f"ri 太短: {len(r)}"
+          print("bosa 头部:", b[:2].hex(), "校准数据长度:", len(b) - 2)
+          print("ri 序列号:", r[0x1a:0x26].decode("latin1").strip())
+          print("ri MAC:", ":".join(f"{x:02x}" for x in r[0x3e:0x44]))
+          CHK
+
       - name: Add tcboot-compatible MD variant (stock U-Boot, non-UBI-kernel)
         run: |
           cat > target/linux/airoha/dts/an758x-nokia_xg-040g-tcboot-parts.dtsi <<'PARTSEOF'
@@ -173,16 +196,6 @@ jobs:
           	};
           };
 
-          /* ri 卷初刷为空，不能让它卡住以太网 probe：先交给用户态处理 */
-          &gdm1 {
-          	/delete-property/ nvmem-cells;
-          	/delete-property/ nvmem-cell-names;
-          };
-
-          &gdm4 {
-          	/delete-property/ nvmem-cells;
-          	/delete-property/ nvmem-cell-names;
-          };
           PARTSEOF
 
           cat > target/linux/airoha/dts/an7581-nokia_xg-040g-md-tcboot.dts <<'DTSEOF'
@@ -209,13 +222,15 @@ jobs:
             $(call Device/nokia_xg-040g-md-common)
             DEVICE_VARIANT := (tcboot)
             DEVICE_DTS := an7581-nokia_xg-040g-md-tcboot
+            SUPPORTED_DEVICES += nokia,xg-040g-md
             KERNEL_SIZE := 8192k
             IMAGE_SIZE := 261120k
             KERNEL_LOADADDR := 0x80088000
+            UBINIZE_PARTS := bosa=$(TOPDIR)/tcboot-parts/bosa.bin=1 ri=$(TOPDIR)/tcboot-parts/ri.bin=1
             IMAGES := factory.bin sysupgrade.bin
             IMAGE/factory.bin := append-kernel | pad-to $$$$(KERNEL_SIZE) | append-ubi
             IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-            DEVICE_PACKAGES := ubi-utils
+            DEVICE_PACKAGES += ubi-utils
           endef
           TARGET_DEVICES += nokia_xg-040g-md-tcboot
 
@@ -292,6 +307,18 @@ jobs:
           fi
           grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi=y" .config \
             || { echo "::error::缺少 nokia_xg-040g-md-ubi"; exit 1; }
+          grep -q "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-tcboot=y" .config \
+            || { echo "::error::tcboot 变体未被选中（设备定义可能没生效）"; exit 1; }
+
+          echo "=== 光口驱动（缺一个都白刷）==="
+          for p in kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond; do
+            grep -q "CONFIG_PACKAGE_${p}=y" .config \
+              || { echo "::error::缺少光口包 $p"; exit 1; }
+            echo "OK   $p"
+          done
+
+          echo "=== 镜像规则确认 ==="
+          grep -n -A16 "define Device/nokia_xg-040g-md-tcboot" target/linux/airoha/image/an7581.mk
 
           echo "=== 关键包 ==="
           for p in luci luci-theme-argon luci-app-passwall luci-app-openclash \
