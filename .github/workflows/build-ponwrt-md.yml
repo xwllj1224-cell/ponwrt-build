@@ -58,12 +58,16 @@ jobs:
       - name: Cache downloads
         uses: actions/cache@v4
         with:
-          path: dl
-          key: ponwrt-dl-an7581-md-${{ hashFiles('configs/an7581.config', 'feeds.conf.default') }}
+          path: |
+            dl
+            staging_dir
+          key: ponwrt-md-v3-${{ hashFiles('configs/an7581.config', 'feeds.conf.default') }}
           restore-keys: |
+            ponwrt-md-v3-
+            ponwrt-md-
             ponwrt-dl-an7581-md-
-            ponwrt-dl-an7581-
-            ponwrt-dl-
+            ponwrt-an7581-v2-
+            ponwrt-an7583-v2-
 
       - name: Update and install feeds
         run: |
@@ -137,6 +141,7 @@ jobs:
           done
 
       - name: Download sources
+        timeout-minutes: 25
         run: make -j"$(nproc)" download
 
       - name: Build firmware
