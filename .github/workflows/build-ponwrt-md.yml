@@ -69,9 +69,33 @@ jobs:
             ponwrt-an7581-v2-
             ponwrt-an7583-v2-
 
-      - name: Update and install feeds
+      - name: Git network hardening
         run: |
-          ./scripts/feeds update -a
+          # runner 出网偶尔挂死（连接不断但零速率），必须让 git 自己断开重试
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+          git config --global http.postBuffer 524288000
+          git config --global advice.detachedHead false
+
+      - name: Update and install feeds
+        timeout-minutes: 40
+        run: |
+          ok=0
+          for i in 1 2 3; do
+            echo "::group::feeds update 第 $i 次"
+            if timeout 900 ./scripts/feeds update -a; then ok=1; echo "feeds update OK"; break; fi
+            echo "第 $i 次失败或超时：清理残缺仓库后续传"
+            for d in packages luci routing telephony video pon_drivers pon_userspace; do
+              if [ -d "feeds/$d" ] && ! git -C "feeds/$d" rev-parse --verify HEAD >/dev/null 2>&1; then
+                echo "清理残缺 feed: $d"; rm -rf "feeds/$d"
+              fi
+            done
+            sleep 15
+          done
+          if [ "$ok" != 1 ]; then echo "::error::feeds update 连续 3 次失败"; exit 1; fi
+          for d in packages luci routing telephony pon_drivers pon_userspace; do
+            [ -d "feeds/$d" ] || { echo "::error::feeds/$d 缺失"; exit 1; }
+          done
           ./scripts/feeds install -a
 
       - name: Configure (an7581 + XG-040G-MD + 附加包)
@@ -141,8 +165,15 @@ jobs:
           done
 
       - name: Download sources
-        timeout-minutes: 25
-        run: make -j"$(nproc)" download
+        timeout-minutes: 30
+        run: |
+          for i in 1 2 3; do
+            echo "::group::make download 第 $i 次"
+            # timeout 让卡死的下载中断，dl/ 里已下好的文件会保留，重试只补缺失
+            if timeout 1500 make -j"$(nproc)" download; then echo "download OK"; break; fi
+            echo "第 $i 次未完成，10s 后续传"
+            sleep 10
+          done
 
       - name: Build firmware
         run: make -j"$(nproc)"
