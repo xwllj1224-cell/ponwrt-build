@@ -98,6 +98,140 @@ jobs:
           done
           ./scripts/feeds install -a
 
+      - name: Add tcboot-compatible MD variant (stock U-Boot, non-UBI-kernel)
+        run: |
+          cat > target/linux/airoha/dts/an758x-nokia_xg-040g-tcboot-parts.dtsi <<'PARTSEOF'
+          // SPDX-License-Identifier: GPL-2.0-only OR MIT
+          //
+          // 原厂 tcboot 布局：bootloader 512K + env 512K + ubi 255M
+          // 内核以 FIT 放在 firmware 区起始，rootfs 在 ubi 卷 rootfs 里
+
+          / {
+          	chosen {
+          		bootargs = "ubi.mtd=ubi root=ubi0:rootfs rootfstype=squashfs ro rootwait console=ttyS0,115200 earlycon";
+          	};
+          };
+
+          &partitions {
+          	partition@0_all {
+          		label = "all_flash";
+          		reg = <0x0 0x10000000>;
+          		read-only;
+          	};
+
+          	partition@0 {
+          		label = "bootloader";
+          		reg = <0x0 0x80000>;
+          		read-only;
+          	};
+
+          	partition@80000 {
+          		label = "env";
+          		reg = <0x80000 0x80000>;
+          	};
+
+          	partition@100000 {
+          		label = "ubi";
+          		reg = <0x100000 0xff00000>;
+          		compatible = "linux,ubi";
+
+          		volumes {
+          			pon_calibration_storage: ubi-volume-bosa {
+          				volname = "bosa";
+
+          				nvmem-layout {
+          					compatible = "fixed-layout";
+          					#address-cells = <1>;
+          					#size-cells = <1>;
+
+          					pon_calibration: calibration@2 {
+          						reg = <0x2 0x200>;
+          					};
+          				};
+          			};
+
+          			ubi-volume-factory {
+          				volname = "ri";
+
+          				nvmem-layout {
+          					compatible = "fixed-layout";
+          					#address-cells = <1>;
+          					#size-cells = <1>;
+
+          					pon_serial: pon-serial@1a {
+          						reg = <0x1a 0xc>;
+          					};
+
+          					macaddr_factory_3e: macaddr@3e {
+          						compatible = "mac-base";
+          						reg = <0x3e 0x6>;
+          						#nvmem-cell-cells = <1>;
+          					};
+          				};
+          			};
+          		};
+          	};
+          };
+
+          /* ri 卷初刷为空，不能让它卡住以太网 probe：先交给用户态处理 */
+          &gdm1 {
+          	/delete-property/ nvmem-cells;
+          	/delete-property/ nvmem-cell-names;
+          };
+
+          &gdm4 {
+          	/delete-property/ nvmem-cells;
+          	/delete-property/ nvmem-cell-names;
+          };
+          PARTSEOF
+
+          cat > target/linux/airoha/dts/an7581-nokia_xg-040g-md-tcboot.dts <<'DTSEOF'
+          // SPDX-License-Identifier: GPL-2.0-only OR MIT
+
+          #include "an7581-nokia_xg-040g-md-common.dtsi"
+          #include "an758x-nokia_xg-040g-tcboot-parts.dtsi"
+
+          / {
+          	model = "Nokia XG-040G-MD (tcboot)";
+          	compatible = "nokia,xg-040g-md", "airoha,an7581", "airoha,en7581";
+          };
+          DTSEOF
+
+          python3 - <<'PYEOF'
+          import re, io
+          p = "target/linux/airoha/image/an7581.mk"
+          src = open(p, encoding="utf-8").read()
+          if "nokia_xg-040g-md-tcboot" in src:
+              print("already patched")
+          else:
+              block = '''
+          define Device/nokia_xg-040g-md-tcboot
+            $(call Device/nokia_xg-040g-md-common)
+            DEVICE_VARIANT := (tcboot)
+            DEVICE_DTS := an7581-nokia_xg-040g-md-tcboot
+            KERNEL_SIZE := 8192k
+            IMAGE_SIZE := 261120k
+            KERNEL_LOADADDR := 0x80088000
+            IMAGES := factory.bin sysupgrade.bin
+            IMAGE/factory.bin := append-kernel | pad-to $$$$(KERNEL_SIZE) | append-ubi
+            IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+            DEVICE_PACKAGES := ubi-utils
+          endef
+          TARGET_DEVICES += nokia_xg-040g-md-tcboot
+
+          '''
+              anchor = "define Device/nokia_xg-040g-md-ubi"
+              idx = src.find(anchor)
+              if idx < 0:
+                  raise SystemExit("anchor not found in an7581.mk")
+              src = src[:idx] + block + src[idx:]
+              open(p, "w", encoding="utf-8").write(src)
+              print("patched an7581.mk")
+          PYEOF
+
+          echo "=== 新增设备确认 ==="
+          grep -n -A14 "Device/nokia_xg-040g-md-tcboot" target/linux/airoha/image/an7581.mk
+
       - name: Configure (an7581 + XG-040G-MD + 附加包)
         run: |
           cp configs/an7581.config .config
@@ -109,6 +243,8 @@ jobs:
           grep -E "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_[a-z0-9_-]+=y" .config
 
           cat >> .config <<'EOF'
+          # ===== 原厂 tcboot 可引导的整包变体 =====
+          CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-tcboot=y
           # ===== LuCI + 中文 + Argon 主题 =====
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-i18n-base-zh-hans=y
